@@ -442,7 +442,7 @@ impl Ctx<'_> {
             if it.fixed_state() == FixedState::SystemFixed {
                 continue;
             }
-            let is_wire = it.is_trace();
+            let is_wire = it.is_trace() && !self.lies_inside_drill_copper(k) && !self.lies_inside_trace_ends(k);
             let is_via = it.is_via();
             let is_area = it.is_conduction_area()
                 && b.layer_structure.layers[it.first_layer(b) as usize].is_signal;
@@ -467,6 +467,68 @@ impl Ctx<'_> {
             file.end_scope();
         }
         Ok(())
+    }
+
+    /// fastroute: a wire that lies entirely in the copper of the one pin or via of its net that it
+    /// touches carries nothing the pad doesn't. `bridge_trace_ends_to_drill_centers` adds such
+    /// bridges for the contact model, narrowed to fit inside the pad (sometimes to a few microns);
+    /// written out they reach the design as tracks below its minimum width.
+    fn lies_inside_drill_copper(&self, key: ItemKey) -> bool {
+        let b = self.board;
+        let wire = b.item(key);
+        let ItemKind::Trace(t) = &wire.kind else {
+            return false;
+        };
+        let layer = t.layer();
+        let start = b.trace_start_contacts(key);
+        let end = b.trace_end_contacts(key);
+        let mut drills = start.iter().chain(end.iter()).filter(|&c| b.item(c).is_drill_item());
+        let Some(drill_key) = drills.next() else {
+            return false;
+        };
+        if drills.any(|other| other != drill_key) {
+            return false;
+        }
+        let drill = b.item(drill_key);
+        if layer < drill.first_layer(b) || layer > drill.last_layer(b) {
+            return false;
+        }
+        let Some(copper) = drill.drill_shape(b, layer - drill.first_layer(b)) else {
+            return false;
+        };
+        // On the border counts as inside: the same reach `snapped_endpoint` moves ends to the center from.
+        let center = drill.center(b).to_float();
+        let reach = copper.border_distance(&center);
+        t.polyline().corners().iter().all(|corner| copper.contains(corner) || corner.to_float().distance(&center) <= reach)
+    }
+
+    /// fastroute: a wire shorter than the half width of every trace it touches lies inside their
+    /// round ends, so those traces already join where it sits. Rip-up can leave such a stub behind (a
+    /// pin or via bridge whose drill item was removed), narrower than the design's minimum width.
+    fn lies_inside_trace_ends(&self, key: ItemKey) -> bool {
+        let b = self.board;
+        let ItemKind::Trace(t) = &b.item(key).kind else {
+            return false;
+        };
+        let start = b.trace_start_contacts(key);
+        let end = b.trace_end_contacts(key);
+        let mut covering_half_width = i32::MAX;
+        for contacts in [&start, &end] {
+            let mut touches_trace = false;
+            for c in contacts.iter() {
+                match &b.item(c).kind {
+                    ItemKind::Trace(other) => {
+                        touches_trace = true;
+                        covering_half_width = covering_half_width.min(other.half_width());
+                    }
+                    _ => return false,
+                }
+            }
+            if !touches_trace {
+                return false;
+            }
+        }
+        t.polyline().length_approx() < covering_half_width as f64
     }
 
     /// Java `SesWriter.snappedEndpoint`.

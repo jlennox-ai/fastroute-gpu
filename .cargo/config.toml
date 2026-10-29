@@ -1,0 +1,4 @@
+# Dropbox holds freshly written build files open (even with the folder in rules.dropboxignore), which
+# breaks cargo's rename-into-place with os error 32, so build output lives outside the synced folder.
+[build]
+target-dir = "C:/Users/joe/.cargo/target/fastroute-custom"

@@ -186,13 +186,22 @@ impl BasicBoard {
             for i in 0..self.tile_shape_count(key) {
                 let layer = first + i;
                 let Some(shape) = self.tile_shape(key, i) else { continue };
-                for o in self.overlapping_objects(&ConvexShape::Tile(shape), layer) {
+                for o in self.overlapping_objects(&ConvexShape::Tile(shape.clone()), layer) {
                     let TreeObject::Item { key: other_key, id } = o else { continue };
                     if other_key == key || result.contains(ItemId(id)) {
                         continue;
                     }
                     let other = self.item(other_key);
-                    if matches!(other.kind, ItemKind::Pin(_) | ItemKind::Via(_)) && other.shares_net(this) {
+                    if !(matches!(other.kind, ItemKind::Pin(_) | ItemKind::Via(_)) && other.shares_net(this)) {
+                        continue;
+                    }
+                    // gametank: KiCad joins a pad and a via only when one's center lies in the other's
+                    // copper. Tiles only approximate round copper (a via's octagon reaches past its
+                    // circle), so mere overlap counted a via 14 um clear of a rounded pad corner as
+                    // connected and the session went out without the wire KiCad needed.
+                    let other_index = layer - other.first_layer(self);
+                    let center_in_other = self.tile_shape(other_key, other_index).is_some_and(|s| s.contains(&drill_center));
+                    if shape.contains(&other.center(self)) || center_in_other {
                         result.insert(ItemId(id), other_key);
                     }
                 }
