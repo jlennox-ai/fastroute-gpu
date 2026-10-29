@@ -7,7 +7,7 @@ use std::io::{self, Write};
 
 use fr_engine::board::{BasicBoard, ItemKey, ItemKind};
 use fr_engine::datastructures::{IdentifierType, IndentFileWriter};
-use fr_engine::ids::{FixedState, NetNo};
+use fr_engine::ids::{FixedState, LayerNo, NetNo};
 use fr_engine::library::Padstack;
 use fr_engine::structure::{CoordinateTransform, DsnShapeCoords};
 use fr_geom::{Area, FloatPoint, Shape};
@@ -442,7 +442,12 @@ impl Ctx<'_> {
             if it.fixed_state() == FixedState::SystemFixed {
                 continue;
             }
-            let is_wire = it.is_trace() && !self.lies_inside_drill_copper(k) && !self.lies_inside_trace_ends(k);
+            // fastroute: a wire whose ends snap to the same drill center (a bridge between a trace end
+            // and that center) is a single point once written: nothing to write.
+            let is_wire = it.is_trace()
+                && self.wire_coordinates(k).len() >= 4
+                && !self.lies_inside_drill_copper(k)
+                && !self.lies_inside_trace_ends(k);
             let is_via = it.is_via();
             let is_area = it.is_conduction_area()
                 && b.layer_structure.layers[it.first_layer(b) as usize].is_signal;
@@ -573,16 +578,28 @@ impl Ctx<'_> {
         None
     }
 
-    fn write_wire(&self, key: ItemKey, file: &mut W<'_>) -> io::Result<()> {
-        let b = self.board;
-        let it = b.item(key);
-        let ItemKind::Trace(t) = &it.kind else {
+    /// fastroute: the narrowest trace any net class asks for, the design's minimum width. No wire is
+    /// written narrower: a bridge from a trace end to a drill center is narrowed to fit inside the pad
+    /// (bridge_trace_ends_to_drill_centers), and when the end sits just outside round copper (fastroute's
+    /// octagons reach past it) that leaves a few microns, which the design rejects. At the minimum width
+    /// the bridge stays within its trace's end and the drill's copper, give or take microns.
+    fn minimum_half_width(&self) -> i32 {
+        let rules = &self.board.rules;
+        let layers = 0..self.board.layer_structure.layers.len() as LayerNo;
+        rules
+            .net_classes
+            .iter()
+            .flat_map(|class| layers.clone().map(move |layer| rules.net_classes[class].get_trace_half_width(layer)))
+            .filter(|&half_width| half_width > 0)
+            .min()
+            .unwrap_or(0)
+    }
+
+    /// The wire's corners in session units, ends snapped to drill centers, repeated points dropped.
+    fn wire_coordinates(&self, key: ItemKey) -> Vec<i32> {
+        let ItemKind::Trace(t) = &self.board.item(key).kind else {
             unreachable!()
         };
-        let layer = &b.layer_structure.layers[t.layer() as usize].name;
-        let width = round(self.ct.board_to_dsn((2 * t.half_width()) as f64));
-        file.start_scope(true);
-        file.write("wire")?;
         let corners = t.polyline().corners();
         let n = corners.len();
         let mut coors: Vec<i32> = Vec::with_capacity(2 * n);
@@ -601,6 +618,20 @@ impl Ctx<'_> {
                 prev = Some(cur);
             }
         }
+        coors
+    }
+
+    fn write_wire(&self, key: ItemKey, file: &mut W<'_>) -> io::Result<()> {
+        let b = self.board;
+        let it = b.item(key);
+        let ItemKind::Trace(t) = &it.kind else {
+            unreachable!()
+        };
+        let layer = &b.layer_structure.layers[t.layer() as usize].name;
+        let width = round(self.ct.board_to_dsn((2 * t.half_width().max(self.minimum_half_width())) as f64));
+        file.start_scope(true);
+        file.write("wire")?;
+        let coors = self.wire_coordinates(key);
         // writePath
         file.start_scope(true);
         file.write("path ")?;
