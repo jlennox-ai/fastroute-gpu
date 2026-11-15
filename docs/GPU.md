@@ -1,144 +1,93 @@
 # GPU acceleration (`--gpu`)
 
-`--gpu` computes a cost-to-go field for each connection on an NVIDIA GPU (CUDA) and uses it as
-the estimate of the maze search. The search itself, insertion, shoving, pull-tight and DRC stay
-on the CPU and unchanged; the field only changes the order in which the search expands rooms.
+With `--gpu`, fastroute uses an NVIDIA GPU to help the router decide where to search. The routing
+itself still runs on the CPU and follows the same rules; the GPU makes each search look at far
+less of the board. Setup: see [What you need for `--gpu`](../README.md#what-you-need-for---gpu).
 
-```sh
-cargo build --release -p fastroute --features gpu     # needs no CUDA toolkit to build
-fastroute -de board.dsn -do board.ses --gpu ...
-```
+## Where the time goes
 
-At run time `--gpu` needs the NVIDIA driver and NVRTC (`nvrtc64_*.dll` / `libnvrtc.so` from a
-CUDA 12 toolkit, on the library path). The kernels are compiled for the device found at start;
-both libraries are loaded at run time, so a binary built with the feature runs without them
-until `--gpu` is given. Without the feature, `--gpu` stops with a message.
-
-## Is there a GPU fastroute already?
-
-No (October 2026). Neither fastroute, its forks, nor Freerouting has GPU code. Related work:
-
-* [OrthoRoute](https://github.com/bbenchoff/OrthoRoute): a GPU (CUDA/Metal) PathFinder router
-  on a Manhattan lattice for very large, regular backplanes; its author recommends other
-  routers for conventional boards.
-* [pcbroute](https://github.com/techcantv/pcbroute): a grid-based negotiated-congestion router
-  with an optional CUDA back end for long searches (new, one commit).
-* GPU global routers for chips (GAMER, FastGR, ...), unrelated to this fastroute despite the
-  name of the chip router FastRoute.
-* The Bradley-Cooley fork of fastroute tried global routing with corridors (negotiated
-  congestion) and a PathFinder history on the CPU; neither helped (its `docs/IMPROVEMENTS.md`,
-  "Not adopted either"). That ruled out the obvious GPU project: a fast global router would
-  only speed up a stage that does not improve the routing.
-
-## What makes sense on a GPU
-
-Profile of a single-threaded run on the test board (samply, passes 1 to 3):
+A single-threaded routing run on a 6-layer board:
 
 | | share of the run |
 |---|---|
-| maze search (`occupy_next_element`) | 87 % |
-| of which: room completion (`complete_shape`, search tree queries) | 43 % |
-| of which: via checks (`check_layer_with_any_matching_via`) | 18 % |
-| of which: shove checks (`shove_trace_room`) | 9 % |
-| insertion of the found connection | 7 % |
-| pull-tight of the changed area | 3 % |
+| finding a path for a connection (maze search) | 87 % |
+| &nbsp;&nbsp;of which: building the free areas the path moves through | 43 % |
+| &nbsp;&nbsp;of which: checking where vias fit | 18 % |
+| &nbsp;&nbsp;of which: checking whether traces can be pushed aside | 9 % |
+| inserting the found path | 7 % |
+| tidying the changed traces | 3 % |
 
-The hot path is a gridless A* over expansion rooms: a priority queue in Java order, rooms built
-on demand from the shape search tree, each step a few microseconds of pointer-heavy geometry
-that depends on the previous one. There is nothing to batch, and a round trip to the GPU costs
-more than a step. Porting it would not be faster.
+The maze search is an A* search: it grows outward from the start, always continuing from the
+most promising spot, where "promising" is the cost so far plus an estimate of the cost still to
+go. Each step is a few microseconds of geometry that depends on the step before it. That cannot
+be split into thousands of independent pieces, which is what a GPU needs, so moving the search
+itself to the GPU would make it slower.
 
-What the GPU can do is make the search smaller. Per-connection statistics
-(`FASTROUTE_MAZE_STATS=file`, see below) showed why the search is large: the estimate is the
-weighted distance to the bounding boxes of the destination items, and the connections found
-cost 1.29 (pass 1), 1.47 (pass 2) and 1.62 (pass 3) times the estimate at their start. A* expands
-every room whose cost plus estimate is below the cost of the connection, so even a 7 % gap on a
-100 mm connection sweeps a band of tens of thousands of small rooms. An estimate that knows the
-copper in between is what shrinks the search, and computing one per connection is a raster
-shortest-path problem over a million cells: work a GPU does well and a CPU does not (432 ms for
-one field with Dijkstra on the CPU, 7 to 12 ms on an RTX 3080).
+## What the GPU does instead
 
-Inflating the estimate instead (weighted A*) was tried first: ×1.1 to ×1.5 make pass 1 1.4 to 4
-times faster but leave 8 to 30 % more connections unrouted after it, because the paths are worse.
-The field keeps the paths and still shrinks the search.
+A* explores every spot whose cost so far plus estimate is below the cost of the final path. The
+better the estimate, the less it explores. The router's estimate is the straight distance to
+the destination, which ignores everything in the way. On real boards the paths found cost 1.3 to
+1.6 times that estimate, so the search sweeps a wide band of the board around every connection.
 
-Not done, and why:
+With `--gpu`, fastroute computes a better estimate for each connection before searching: a map
+of the cheapest cost from every point near the connection to its destination, going around the
+pins, keepouts and traces in the way. Computing that map is the same simple calculation repeated
+over a million grid cells, which is exactly what a GPU is good at: 7 to 12 ms per connection on an
+RTX 3080, against about 430 ms on the CPU.
 
-* Global routing / corridors on the GPU: no gain on the CPU (see above), so none on the GPU.
-* The gridless search, room completion, shove and insertion: sequential, see above.
-* DRC (clearance checks of new items): a few percent of the run.
+The map only steers the search; the search still checks every step against the real board, so
+the result obeys the same design rules. Simply making the plain estimate larger also shrinks the
+search, but then the router settles for worse paths and leaves 8 to 30 % more connections
+unrouted after the first pass. The map shrinks the search without that cost.
 
-## The guide field
+## How the map is built
 
-For a connection whose start and destination items span at least `--guide-min-span-mm` (10 mm),
-the window is their bounding box enlarged by a quarter of the span (at least 3 mm), rastered
-at `--guide-cell-um` (100 µm; larger windows get larger cells, at most 2^20 cells per layer).
-On each routing layer, from the shapes of the autoroute search tree:
+Only connections spanning at least 10 mm get a map (`--guide-min-span-mm`); short ones are cheap
+anyway. The map covers the box around the connection's start and destination plus a margin of a
+quarter of its size, at a resolution of 0.1 mm (`--guide-cell-um`; coarser for large boxes), on
+every routing layer:
 
-* items of other nets that cannot be ripped (pins, fixed wiring, keepouts, the outline) block
-  the cells whose centres they cover;
-* items that can be ripped charge a share (`--guide-soft-cost`, 0.5) of their rip-up cost when a
-  move enters them;
-* the destination items' cells are 0, the window border starts at the plain estimate (so that
-  paths leaving the window are not overestimated).
+* Things the router may never move (pins of other nets, fixed traces, keepouts, the board
+  outline) block the cells they cover.
+* Traces the router may rip up and reroute make a cell more expensive
+  (`--guide-soft-cost`, half their rip-up cost).
+* The destination costs 0. At the edge of the box the map falls back to the plain estimate, so
+  paths that leave the box are not judged too expensive.
 
-Moves are the 8 neighbours and the 8 knight moves (a straight distance is overestimated by at
-most 2.7 %), weighted by the layer's horizontal and vertical trace costs; a via costs the
-cheapest via cost. The field is the cheapest cost from each cell to the destination. In the
-search, the estimate of a point is the larger of the plain estimate and the field's value at
-the point (lowered by half a cell's cost); where the field has no value the plain estimate is
-used. Code: `crates/fr-engine/src/autoroute/guide/` (problem, raster rules, CPU reference
-solver), `crates/fr-gpu/` (CUDA solver).
+From each cell a path can step to its 8 neighbours or by a knight's move (which keeps diagonal
+distances within 3 % of the true length), or change layer through a via. The cost of each step
+follows the router's own trace and via costs.
 
-### The CUDA solver
+In the search, the estimate for a point is the larger of the plain estimate and the map's value
+there. The code is in `crates/fr-engine/src/autoroute/guide/` (the map's rules and a CPU version,
+used by `--guide=cpu` and the tests) and `crates/fr-gpu/` (the GPU version).
 
-1. Rasterize: one block per polygon tests the cell centres of its bounding box; soft items
-   keep the cheapest per cell (`atomicMin` on cost and item).
-2. Start values, boundary seeds, and a 16-bit mask of the allowed moves of each cell.
-3. Relax: one block per 32 × 32 tile, a warp per layer and sweep direction. A tile loads its
-   cells and a 2-cell halo into shared memory and sweeps left to right, right to left, bottom
-   to top and top to bottom at the same time (each step pulls the 7 moves from the cells
-   already swept, plus vias), at most 2 rounds per launch, then writes back and wakes the
-   neighbours whose halo it changed. Launches repeat until nothing changes.
+## On the GPU
 
-The relaxation only lowers values, so the order of updates does not matter; its fixpoint is the
-Dijkstra field. `crates/fr-gpu/tests/matches_cpu.rs` compares the two on random problems (hard
-and soft obstacles, 1 to 3 layers, boundary seeds, destinations smaller than a cell): equal up
-to float rounding (relative 6e-6). The raster tests use `__fmul_rn`/`__fadd_rn` so that both
-sides decide every cell the same way. Results are deterministic: the field depends only on the
-board the connection is routed on.
-
-Kernel tuning on a board-sized field (64 × 64 mm, 0.1 mm, 2 layers, 1800 obstacles):
-
-| step | ms per field |
-|---|---|
-| tile relaxation, all moves per round, global memory | 72 |
-| tile data in shared memory | 46 |
-| directional sweeps (one warp per layer) | 35 |
-| four sweep directions concurrently | 15 |
-| wake only the neighbours whose halo changed, odd shared-memory pitch, unrolled moves | 12 |
-| at most 2 rounds per tile and launch | 7 |
-
-A field needs about 40 launches: a change crosses one tile per launch.
+The board is split into tiles of 32 × 32 cells. Each tile sweeps its cells in all four directions
+at once, lowering every cell's cost wherever a neighbour offers a cheaper way to the destination,
+and wakes the neighbouring tiles it changed. This repeats until nothing changes, about 40 rounds
+for a board-sized map. Since costs only ever go down, the order of updates does not matter and
+the result is exact: the tests compare it with the CPU version on random boards and it matches to
+within float rounding. The map depends only on the board, so runs are repeatable.
 
 ## Results
 
-The 6-layer GameTank board (3 signal layers, 1053 connections to route, 3 router threads, no
-fanout or optimizer; the board was held out of the PGO training), on an Intel Core i9-10900K
-with an NVIDIA GeForce RTX 3080, one run each:
+The 6-layer board above (1053 connections to route, 3 router threads), Intel Core i9-10900K with
+an NVIDIA GeForce RTX 3080, one run each:
 
 | | without `--gpu` | `--gpu` |
 |---|---|---|
 | first pass | 180 s (405 left) | 62 s (427 left) |
 | down to 1 unrouted | 866 s | 301 s |
-| whole run (70 passes, stopped by the stagnation rule) | 901 s | 509 s |
+| whole run | 901 s | 509 s |
 | unrouted | 1 | 1 |
 | vias | 2001 | 2006 |
 | track length | 33.40 m | 33.49 m |
 
 ## Statistics
 
-`FASTROUTE_MAZE_STATS=FILE` writes one line per connection attempt: start and destination
-items, polled and expanded maze elements, rooms, the estimate at the start and the cost found,
-whether a guide field was used, its build, solve and download times, relaxation launches,
-cells and obstacles, and the time of the search, location, insertion and pull-tight.
+`FASTROUTE_MAZE_STATS=FILE` writes one line per connection the router tries: how much the search
+explored, the estimate at the start against the cost found, whether a map was used and how long
+it took to build, and how long the search, insertion and tidying took.
