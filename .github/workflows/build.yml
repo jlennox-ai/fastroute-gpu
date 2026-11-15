@@ -1,0 +1,149 @@
+name: build
+
+# Builds fastroute for every release target with profile-guided optimization. A tag v<version>
+# also publishes a release with the five archives. Only targets an NVIDIA driver exists for are
+# built (not Windows on ARM, not macOS).
+#
+# Where the profile comes from:
+# * windows-x86-64, windows-avx256: the committed pgo/fastroute.profdata, trained with the GPU
+#   (scripts/pgo-profile.sh, rerun before a push; the runners have no GPU). A profile only fits
+#   the host it was trained on, because cargo hashes the host into every symbol name.
+# * all other targets: trained on the runner, CPU only (scripts/build-pgo.sh).
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # the Freerouting commit fastroute is a port of; its benchmark boards train the profiles
+  FREEROUTING_COMMIT: aa909a3450d2de57cb7823f2098fe38c4af67769
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows-x86-64, runner: windows-latest, profile: committed, rustflags: "" }
+          - { name: windows-avx256, runner: windows-latest, profile: committed, rustflags: "-C target-cpu=x86-64-v3" }
+          - { name: linux-x86-64, runner: ubuntu-22.04, profile: trained, rustflags: "" }
+          - { name: linux-avx256, runner: ubuntu-22.04, profile: trained, rustflags: "-C target-cpu=x86-64-v3" }
+          - { name: linux-arm64, runner: ubuntu-22.04-arm, profile: trained, rustflags: "" }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Versions
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
+          [ -n "$version" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "tag $GITHUB_REF_NAME does not match the version $version of Cargo.toml" >&2
+            exit 1
+          fi
+          echo "archive=fastroute-gpu-$version-${{ matrix.name }}" >> "$GITHUB_OUTPUT"
+          echo "rustc=$(cat pgo/rustc-version)" >> "$GITHUB_OUTPUT"
+
+      # the compiler version that wrote the committed profile, for every target
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.version.outputs.rustc }}
+          components: llvm-tools-preview
+
+      - name: Build with the committed profile
+        if: matrix.profile == 'committed'
+        env:
+          # RUSTFLAGS and CARGO_TARGET_DIR replace the local settings of .cargo/config.toml
+          RUSTFLAGS: ${{ matrix.rustflags }} -C profile-use=${{ github.workspace }}\pgo\fastroute.profdata
+          CARGO_TARGET_DIR: ${{ github.workspace }}\target\pgo\use
+        run: cargo build --release --locked -p fastroute --features gpu
+
+      - name: Fetch the training boards
+        if: matrix.profile == 'trained'
+        uses: actions/checkout@v4
+        with:
+          repository: freerouting/freerouting
+          ref: ${{ env.FREEROUTING_COMMIT }}
+          path: reference/freerouting
+          sparse-checkout: scripts/benchmark/fixtures
+
+      - name: Train a profile and build with it
+        if: matrix.profile == 'trained'
+        env:
+          PGO_RUSTFLAGS: ${{ matrix.rustflags }}
+          PGO_FEATURES: gpu
+          CARGO_PROFILE_RELEASE_STRIP: symbols
+        run: sh scripts/build-pgo.sh
+
+      - name: Package
+        run: |
+          archive=${{ steps.version.outputs.archive }}
+          mkdir -p "dist/$archive"
+          cp LICENSE NOTICE README.md "dist/$archive/"
+          cd dist
+          if [ "$RUNNER_OS" = Windows ]; then
+            cp ../target/pgo/use/release/fastroute.exe "$archive/"
+            "$archive/fastroute.exe" --version
+            7z a -bd "$archive.zip" "$archive"
+          else
+            cp ../target/pgo/use/release/fastroute "$archive/"
+            "$archive/fastroute" --version
+            tar -czf "$archive.tar.gz" "$archive"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            dist/*.zip
+            dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          version=${GITHUB_REF_NAME#v}
+          [ "$(ls | wc -l)" = 5 ] || { echo "expected 5 archives:" >&2; ls >&2; exit 1; }
+          sha256sum * > SHA256SUMS.txt
+          prefix=fastroute-gpu-$version
+          cat > ../notes.md <<EOF
+          | | x86-64 | AVX256 | ARM64 |
+          |---|---|---|---|
+          | Windows | \`$prefix-windows-x86-64.zip\` | \`$prefix-windows-avx256.zip\` | |
+          | Linux | \`$prefix-linux-x86-64.tar.gz\` | \`$prefix-linux-avx256.tar.gz\` | \`$prefix-linux-arm64.tar.gz\` |
+
+          * **x86-64** runs on every 64-bit Intel/AMD processor.
+          * **AVX256** is built for x86-64-v3 (AVX2, 256-bit vectors: Intel Haswell 2013 / AMD Excavator 2015 and newer) and is faster; it does not start on older processors.
+          * \`--gpu\` needs an NVIDIA GPU with its driver and NVRTC from a CUDA 12 toolkit on the library path. There are no builds for Windows on ARM or macOS, which have no NVIDIA driver; [fastroute](https://github.com/parisxmas/fastroute/releases) has them.
+          * The Linux builds need glibc 2.35 (Ubuntu 22.04) or newer.
+
+          All builds are profile-guided (PGO); the Windows x86-64 and AVX256 profiles were trained with the GPU.
+          EOF
+          gh release create "$GITHUB_REF_NAME" * \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "fastroute-gpu $version" \
+            --notes-file ../notes.md --generate-notes
