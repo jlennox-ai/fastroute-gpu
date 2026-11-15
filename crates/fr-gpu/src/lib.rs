@@ -151,8 +151,8 @@ impl CudaFieldSolver {
             return Err("the NVIDIA driver's CUDA library (nvcuda.dll / libcuda.so) was not found; install the NVIDIA driver".into());
         }
         if !unsafe { cudarc::nvrtc::sys::is_culib_present() } {
-            return Err("NVRTC (nvrtc64_120_0.dll / libnvrtc.so.12) was not found; install the CUDA Toolkit 12, or put its NVRTC \
-                        libraries on the library path (Windows: PATH or next to fastroute.exe, Linux: LD_LIBRARY_PATH)"
+            return Err("NVRTC (nvrtc64_120_0.dll / libnvrtc.so.12) was not found; extract NVIDIA's NVRTC archive next to \
+                        fastroute (see the README)"
                 .into());
         }
         let ctx =CudaContext::new(0).map_err(|e| format!("no CUDA device: {e:?}"))?;

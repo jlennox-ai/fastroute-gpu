@@ -99,6 +99,9 @@ jobs:
           else
             cp ../target/pgo/use/release/fastroute "$archive/"
             "$archive/fastroute" --version
+            # NVRTC is looked up next to the executable (crates/fastroute/build.rs)
+            readelf -d "$archive/fastroute" | grep -q 'Library rpath: \[\$ORIGIN\]' \
+              || { echo "fastroute has no RPATH \$ORIGIN" >&2; readelf -d "$archive/fastroute" >&2; exit 1; }
             tar -czf "$archive.tar.gz" "$archive"
           fi
 
