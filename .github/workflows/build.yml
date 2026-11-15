@@ -48,9 +48,13 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml)
           [ -n "$version" ] || { echo "no version in Cargo.toml" >&2; exit 1; }
-          if [ "$GITHUB_REF_TYPE" = tag ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
-            echo "tag $GITHUB_REF_NAME does not match the version $version of Cargo.toml" >&2
-            exit 1
+          # versions follow fastroute's; v<version>-<n> is a further release of this fork on it
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            echo "${GITHUB_REF_NAME#v}" | grep -qxE "$(echo "$version" | sed 's/[.]/[.]/g')(-[0-9]+)?" || {
+              echo "tag $GITHUB_REF_NAME is neither v$version nor v$version-<n> (Cargo.toml: $version)" >&2
+              exit 1
+            }
+            version=${GITHUB_REF_NAME#v}
           fi
           echo "archive=fastroute-gpu-$version-${{ matrix.name }}" >> "$GITHUB_OUTPUT"
           echo "rustc=$(cat pgo/rustc-version)" >> "$GITHUB_OUTPUT"
