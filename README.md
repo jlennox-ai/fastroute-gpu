@@ -1,47 +1,32 @@
 # fastroute-gpu
 
-A fork of [fastroute](https://github.com/parisxmas/fastroute), the Rust port of the
-[Freerouting](https://github.com/freerouting/freerouting) PCB autorouter, that uses an NVIDIA
-GPU to make the maze search smaller. Everything else (options, KiCad plugin, documentation) is
-fastroute's: see [its README](https://github.com/parisxmas/fastroute#readme).
+A fork of [fastroute](https://github.com/parisxmas/fastroute) that uses NVIDIA CUDA, **routing ~2x faster.**
 
 ## What is different from fastroute
 
-- **`--gpu`**: for each connection a cost-to-go field is computed on the GPU (CUDA) and guides
-  the maze search, which then expands far fewer rooms. Routing, shoving and DRC stay on the CPU
-  and unchanged. How it works and what was measured: [docs/GPU.md](docs/GPU.md).
-- **`--guide=cpu`**: the same field from a CPU reference solver (slow; for testing).
-- **`FASTROUTE_MAZE_STATS=FILE`**: per-connection statistics of the maze search.
-- **Session files KiCad's DRC accepts after resuming** (`--initial-session`): no zero-length or
-  sub-minimum-width bridge stubs, and KiCad's rule for via-to-pad contact.
-- **Release builds are profile-guided (PGO)** for every target, and come in two x86-64
-  variants: `x86-64` for any processor, `AVX256` for x86-64-v3 (AVX2; Haswell / Excavator and
-  newer).
+- **`--gpu`**: Use CUDA to help path routes. Details: [docs/GPU.md](docs/GPU.md).
+- **PGO builds**: Even the CPU parts of this build are faster than the originals.
 
 ## Comparison
 
 Board with 6 layers (3 signal layers), 362 parts, 1754 connections of which 1053
-are left to route, 3 router threads, no fanout or optimizer. Intel Core i9-10900K,
-GeForce RTX 3080, Windows 11.
+are left to route, 3 router threads, no fanout or optimizer.
+Intel Core i9-10900K, GeForce RTX 3080, Windows 11.
 
-| | fastroute 0.1.14 (original) | fastroute-gpu, CPU only | fastroute-gpu `--gpu` |
+| | fastroute 0.1.14 (original) | fastroute-gpu (CPU only) | fastroute-gpu (`--gpu`) |
 |---|---|---|---|
 | First pass | 211 s | 180 s | 62 s |
 | Down to 1 unrouted | 1014 s | 866 s | 301 s |
 | Whole run | 1058 s | 901 s | **509 s** |
-| Unrouted | 1 | 1 | 1 |
 | Vias | 2001 | 2001 | 2006 |
 | Track length | 33.40 m | 33.40 m | 33.49 m |
 
-*\* CPU only is AVX256 w/ PGO without `--gpu`.*
+*\* CPU only is AVX256 w/ PGO*
 
 ## Download and run
 
-Download: [Releases](https://github.com/jlennox-ai/fastroute-gpu/releases)
-
-```sh
-fastroute -de board.dsn -do board.ses --gpu
-```
+- Download: [Releases](https://github.com/jlennox-ai/fastroute-gpu/releases)
+- `fastroute -de board.dsn -do board.ses --gpu`
 
 ### What you need for `--gpu`
 

@@ -71,20 +71,6 @@ for a board-sized map. Since costs only ever go down, the order of updates does 
 the result is exact: the tests compare it with the CPU version on random boards and it matches to
 within float rounding. The map depends only on the board, so runs are repeatable.
 
-## Results
-
-The 6-layer board above (1053 connections to route, 3 router threads), Intel Core i9-10900K with
-an NVIDIA GeForce RTX 3080, one run each:
-
-| | without `--gpu` | `--gpu` |
-|---|---|---|
-| first pass | 180 s (405 left) | 62 s (427 left) |
-| down to 1 unrouted | 866 s | 301 s |
-| whole run | 901 s | 509 s |
-| unrouted | 1 | 1 |
-| vias | 2001 | 2006 |
-| track length | 33.40 m | 33.49 m |
-
 ## Statistics
 
 `FASTROUTE_MAZE_STATS=FILE` writes one line per connection the router tries: how much the search
