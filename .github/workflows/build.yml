@@ -1,14 +1,8 @@
 name: build
 
-# Builds fastroute for every release target with profile-guided optimization. A tag v<version>
-# also publishes a release with the five archives. Only targets an NVIDIA driver exists for are
-# built (not Windows on ARM, not macOS).
-#
-# Where the profile comes from:
-# * windows-x86-64, windows-avx256: the committed pgo/fastroute.profdata, trained with the GPU
-#   (scripts/pgo-profile.sh, rerun before a push; the runners have no GPU). A profile only fits
-#   the host it was trained on, because cargo hashes the host into every symbol name.
-# * all other targets: trained on the runner, CPU only (scripts/build-pgo.sh).
+# PGO builds of every target; a tag v<version> also publishes a release. Windows uses the
+# committed GPU-trained profile (pgo/); Linux trains its own on the runner (a profile only fits
+# the platform it was trained on).
 on:
   push:
     branches: [main]
@@ -136,19 +130,9 @@ jobs:
           version=${GITHUB_REF_NAME#v}
           [ "$(ls | wc -l)" = 5 ] || { echo "expected 5 archives:" >&2; ls >&2; exit 1; }
           sha256sum * > SHA256SUMS.txt
-          prefix=fastroute-gpu-$version
           cat > ../notes.md <<EOF
-          | | x86-64 | AVX256 | ARM64 |
-          |---|---|---|---|
-          | Windows | \`$prefix-windows-x86-64.zip\` | \`$prefix-windows-avx256.zip\` | |
-          | Linux | \`$prefix-linux-x86-64.tar.gz\` | \`$prefix-linux-avx256.tar.gz\` | \`$prefix-linux-arm64.tar.gz\` |
-
-          * **x86-64** runs on every 64-bit Intel/AMD processor.
-          * **AVX256** is built for x86-64-v3 (AVX2, 256-bit vectors: Intel Haswell 2013 / AMD Excavator 2015 and newer) and is faster; it does not start on older processors.
-          * \`--gpu\` needs an NVIDIA GPU and NVIDIA's NVRTC library next to fastroute: see [What you need for \`--gpu\`](https://github.com/$GITHUB_REPOSITORY#what-you-need-for---gpu). There are no builds for Windows on ARM or macOS, which have no NVIDIA driver; [fastroute](https://github.com/parisxmas/fastroute/releases) has them.
-          * The Linux builds need glibc 2.35 (Ubuntu 22.04) or newer.
-
-          All builds are profile-guided (PGO); the Windows x86-64 and AVX256 profiles were trained with the GPU.
+          * **AVX256** is faster but needs a processor from 2013 or later; otherwise use **x86-64**.
+          * Setup for \`--gpu\`: [What you need for \`--gpu\`](https://github.com/$GITHUB_REPOSITORY#what-you-need-for---gpu).
           EOF
           gh release create "$GITHUB_REF_NAME" * \
             --repo "$GITHUB_REPOSITORY" \
