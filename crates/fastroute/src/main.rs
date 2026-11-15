@@ -17,6 +17,9 @@
 //! * `--report=FILE` (+ `--diagnose`): JSON summary of the result, see [`report`].
 //! * `--live[=PORT]`: live web viewer of the routing on http://127.0.0.1:PORT (default 7878),
 //!   see [`live`].
+//! * `--guide=cpu|gpu` (`--gpu` = `--guide=gpu`) and `--guide-*=V`: a cost-to-go field guides
+//!   the maze search (see `fr_engine::autoroute::guide`); `gpu` computes it with CUDA (built with
+//!   the `gpu` feature).
 //! * `-v`: debug output.
 //!
 //! The session file (`-do`) is also written whenever routing or optimizing reaches a new best
@@ -32,6 +35,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
+use fr_engine::autoroute::guide::cpu::CpuFieldSolver;
+use fr_engine::autoroute::guide::{FieldSolver, GuideSettings};
 use fr_engine::board::{TimeLimitMode, TimeLimitPolicy};
 use fr_engine::datastructures::StopToken;
 use fr_engine::board::{BasicBoard, ItemKey, ItemKind, RoutingBoard};
@@ -57,6 +62,9 @@ struct Args {
     diagnose: bool,
     initial_session: Option<String>,
     live: Option<u16>,
+    guide: Option<String>,
+    /// `--guide-<name>=<value>` overrides of the guide defaults.
+    guide_options: Vec<(String, f64)>,
     verbose: bool,
     rest: Vec<String>,
 }
@@ -81,6 +89,8 @@ fn parse_args() -> Result<Args, String> {
         diagnose: false,
         initial_session: None,
         live: None,
+        guide: None,
+        guide_options: Vec::new(),
         verbose: false,
         rest: Vec::new(),
     };
@@ -133,6 +143,11 @@ fn parse_args() -> Result<Args, String> {
             }
             "-v" => {
                 args.verbose = true;
+                i += 1;
+                continue;
+            }
+            "--gpu" => {
+                args.guide = Some("gpu".to_string());
                 i += 1;
                 continue;
             }
@@ -196,6 +211,18 @@ fn parse_args() -> Result<Args, String> {
                     i += 1;
                     continue;
                 }
+                if let Some(m) = a.strip_prefix("--guide=") {
+                    args.guide = Some(m.to_string());
+                    i += 1;
+                    continue;
+                }
+                if let Some(m) = a.strip_prefix("--guide-") {
+                    let (name, v) = m.split_once('=').ok_or(format!("{a}: expected --guide-<name>=<value>"))?;
+                    let v: f64 = v.parse().map_err(|_| format!("bad value in {a}"))?;
+                    args.guide_options.push((name.to_string(), v));
+                    i += 1;
+                    continue;
+                }
                 if let Some(m) = a.strip_prefix("--time-limit-factor=") {
                     args.time_limit_factor = m.parse().map_err(|_| format!("bad --time-limit-factor '{m}'"))?;
                     i += 1;
@@ -210,6 +237,46 @@ fn parse_args() -> Result<Args, String> {
 }
 
 const DEFAULT_LIVE_PORT: u16 = 7878;
+
+/// The guide field settings of `--guide` / `--gpu` and the `--guide-*` options.
+fn guide_settings(args: &Args) -> Result<Option<Arc<GuideSettings>>, String> {
+    let Some(kind) = &args.guide else {
+        if !args.guide_options.is_empty() {
+            return Err("the --guide-* options need --guide=cpu|gpu".into());
+        }
+        return Ok(None);
+    };
+    let solver: Arc<dyn FieldSolver> = match kind.as_str() {
+        "cpu" => Arc::new(CpuFieldSolver),
+        "gpu" => gpu_solver()?,
+        other => return Err(format!("unknown --guide '{other}' (cpu or gpu)")),
+    };
+    let mut settings = GuideSettings::new(solver);
+    for (name, value) in &args.guide_options {
+        match name.as_str() {
+            "cell-um" => settings.cell_size_um = *value,
+            "soft-cost" => settings.soft_cost_factor = *value,
+            "min-span-mm" => settings.min_span_mm = *value,
+            "margin-mm" => settings.margin_mm = *value,
+            "estimate-factor" => settings.estimate_factor = *value,
+            _ => return Err(format!("unknown option --guide-{name}")),
+        }
+    }
+    log::info!(target: "fastroute", "guide field: {settings:?}");
+    Ok(Some(Arc::new(settings)))
+}
+
+#[cfg(feature = "gpu")]
+fn gpu_solver() -> Result<Arc<dyn FieldSolver>, String> {
+    let solver = fr_gpu::CudaFieldSolver::new().map_err(|e| format!("--guide=gpu: {e}"))?;
+    log::info!(target: "fastroute", "guide field on the GPU: {}", solver.device_name());
+    Ok(Arc::new(solver))
+}
+
+#[cfg(not(feature = "gpu"))]
+fn gpu_solver() -> Result<Arc<dyn FieldSolver>, String> {
+    Err("--guide=gpu: this fastroute was built without the gpu feature (cargo build --release -p fastroute --features gpu)".into())
+}
 
 const HELP: &str = "\
 usage: fastroute -de <design.dsn> [-do <out.ses>] [options] [--router.<path>=<value> ...]
@@ -237,6 +304,17 @@ options:
                            loaded board (congestion vs. blocked by geometry/rules)
   --live[=PORT]            watch the routing live in the browser (http://127.0.0.1:PORT,
                            default 7878; opened automatically)
+  --guide=cpu|gpu          guide the maze search with a cost-to-go field around each
+                           connection (obstacles, rip-up charges, via costs); gpu computes
+                           it with CUDA (needs a build with the gpu feature)
+  --gpu                    = --guide=gpu
+  --guide-cell-um=V        raster cell size (default 100)
+  --guide-soft-cost=V      charge for entering a rippable item, share of its rip-up cost
+                           (default 0.5)
+  --guide-min-span-mm=V    connections spanning less use the plain estimate (default 10)
+  --guide-margin-mm=V      window margin around the connection (default 3, at least a
+                           quarter of the connection's span)
+  --guide-estimate-factor=V  scale of the field estimate (default 1)
   --multi-start=N          rerun the autorouter with N-1 shuffled orders in parallel if
                            connections stay unrouted (default 4; skipped after a first run
                            longer than 10 minutes)
@@ -379,6 +457,7 @@ fn run() -> Result<(), String> {
     }
     let env = EnvironmentSettings::from_process_env();
     let procs = available_processors();
+    let guide = guide_settings(&args)?;
 
     let Some(path) = args.design_in else {
         return Err("no input design given (-de board.dsn)".into());
@@ -526,6 +605,7 @@ fn run() -> Result<(), String> {
         }) as pipeline::Checkpoint
     });
     let ctx = PipelineContext { stop, wall_clock_limits: limits, optimizer_mode,
+        guide,
         enhancements: !args.parity && !args.no_enhancements,
         multi_start: args.multi_start,
         checkpoint,

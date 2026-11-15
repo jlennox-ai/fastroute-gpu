@@ -1,11 +1,15 @@
 //! Port of `autoroute/maze/AutorouteControl.java` and `autoroute/AutorouteAttemptResult.java`.
 
+use std::sync::Arc;
+
 use fr_geom::Point;
 use fr_settings::{ExpansionCostFactor, RouterSettings};
 
 use crate::board::{AutorouteAttemptState, RoutingBoard};
 use crate::ids::{ClearanceClassNo, LayerNo, NetNo};
 use crate::rules::ViaRule;
+
+use super::guide::GuideSettings;
 
 /// Java `AutorouteAttemptResult`: the state and a detail message.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,6 +109,8 @@ pub struct AutorouteControl {
     pub fanout_min_escape_length_mm: Option<f64>,
     /// `settings.fanout.maxEscapeLengthMm`.
     pub fanout_max_escape_length_mm: Option<f64>,
+    /// fastroute: the guide field of the maze search, if enabled (see [`super::guide`]).
+    pub guide: Option<Arc<GuideSettings>>,
 }
 
 impl AutorouteControl {
@@ -190,6 +196,7 @@ impl AutorouteControl {
             start_ripup_costs: settings.get_start_ripup_costs(),
             fanout_min_escape_length_mm: settings.fanout.min_escape_length_mm,
             fanout_max_escape_length_mm: settings.fanout.max_escape_length_mm,
+            guide: None,
         }
     }
 

@@ -4,7 +4,7 @@
 
 use std::cmp::Ordering;
 
-use fr_geom::{FloatLine, FloatPoint, IntPoint, Line, LineSegment, Point, Polyline, Side, TileShape};
+use fr_geom::{FloatLine, FloatPoint, IntBox, IntPoint, Line, LineSegment, Point, Polyline, Side, TileShape};
 use fr_jcompat::{JavaRandom, JavaTreeSet};
 
 use crate::board::actions::forced_pad_router::CheckDrillResult;
@@ -139,6 +139,12 @@ pub struct MazeSearchEngine<'a> {
     random_generator: JavaRandom,
     destination_door: Option<Expandable>,
     section_no_of_destination_door: i32,
+    /// fastroute: elements taken from the queue (see [`super::stats`]).
+    pub polled: u64,
+    /// fastroute: elements expanded (see [`super::stats`]).
+    pub expanded: u64,
+    /// fastroute: the expansion value of the destination element, -1 while not found.
+    pub found_cost: f64,
 }
 
 impl<'a> MazeSearchEngine<'a> {
@@ -159,6 +165,9 @@ impl<'a> MazeSearchEngine<'a> {
             random_generator,
             destination_door: None,
             section_no_of_destination_door: 0,
+            polled: 0,
+            expanded: 0,
+            found_cost: -1.0,
         }
     }
 
@@ -258,6 +267,7 @@ impl<'a> MazeSearchEngine<'a> {
                 return false;
             }
             let index = self.queue.poll_first().unwrap();
+            self.polled += 1;
             let e = self.elements[index].clone();
             // (kept while tracing: the trace reads the elements after the search)
             if self.trace_added.is_none() {
@@ -271,6 +281,7 @@ impl<'a> MazeSearchEngine<'a> {
         let Some(list_element) = list_element else {
             return false;
         };
+        self.expanded += 1;
         {
             let section = self.eng.element_mut(list_element.door, list_element.section_no_of_door);
             section.backtrack_door = list_element.backtrack_door;
@@ -288,6 +299,7 @@ impl<'a> MazeSearchEngine<'a> {
                 // The destination is reached.
                 self.destination_door = Some(list_element.door);
                 self.section_no_of_destination_door = list_element.section_no_of_door;
+                self.found_cost = list_element.expansion_value;
                 return false;
             }
         }
@@ -721,6 +733,7 @@ impl<'a> MazeSearchEngine<'a> {
         self.reduce_trace_shapes_at_tie_pins(destination_items, ctrl.net_number);
         // process the destination items
         let mut destination_ok = false;
+        let mut destination_box: Option<IntBox> = None;
         for key in destination_items.iter() {
             if self.eng.is_stop_requested() {
                 return false;
@@ -729,10 +742,22 @@ impl<'a> MazeSearchEngine<'a> {
             for i in 0..self.board.tree_shape_count(tree, key) {
                 if let Some(s) = self.board.tree_shape(tree, key, i) {
                     let layer = self.board.shape_layer(key, i);
-                    self.destination_distance.join(&s.bounding_box(), layer);
+                    let shape_box = s.bounding_box();
+                    destination_box = Some(destination_box.map_or(shape_box.clone(), |b| b.union_int_box(&shape_box)));
+                    self.destination_distance.join(&shape_box, layer);
                 }
             }
             destination_ok = true;
+        }
+        if super::stats::enabled() {
+            let units_per_mm = self.board.communication.get_resolution(Unit::Mm);
+            let area = destination_box.map_or(0.0, |b| (b.ur.x - b.ll.x) as f64 * (b.ur.y - b.ll.y) as f64 / (units_per_mm * units_per_mm));
+            super::stats::update(|s| {
+                s.start_items = start_items.len();
+                s.destination_items = destination_items.len();
+                s.destination_box_area_mm2 = area;
+                s.start_estimate = f64::MAX;
+            });
         }
         if !destination_ok && ctrl.is_fanout {
             // destination set is not needed for fanout
@@ -744,6 +769,17 @@ impl<'a> MazeSearchEngine<'a> {
         if !destination_ok {
             log::debug!(target: "fr_engine::pipeline::diag", "MazeSearchEngine.init: Failed - no valid destination items found");
             return false;
+        }
+        if let Some(settings) = ctrl.guide.as_deref().filter(|_| !ctrl.is_fanout) {
+            let field_start = std::time::Instant::now();
+            let field = super::guide::build_field(self.board, tree, ctrl, start_items, destination_items, &self.destination_distance, settings);
+            super::stats::update(|s| {
+                s.field_time += field_start.elapsed();
+                s.guided |= field.is_some();
+            });
+            if let Some(field) = field {
+                self.destination_distance.set_guide(std::sync::Arc::new(field));
+            }
         }
         // process the start items
         let mut start_rooms: Vec<RoomId> = Vec::new();
@@ -795,6 +831,7 @@ impl<'a> MazeSearchEngine<'a> {
                 let shape_entry = FloatLine::new(current_center, current_center);
                 let layer = self.room_layer(current_room);
                 let sorting_value = self.destination_distance.calculate_point(&current_center, layer);
+                super::stats::update(|s| s.start_estimate = s.start_estimate.min(sorting_value));
                 let new_list_element = MazeListElement::new(
                     Expandable::Target(current_door),
                     0,

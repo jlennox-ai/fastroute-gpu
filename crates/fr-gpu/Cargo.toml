@@ -1,0 +1,12 @@
+[package]
+name = "fr-gpu"
+description = "CUDA solver of fastroute's guide field (the maze search's cost-to-go estimate)"
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+fr-engine = { path = "../fr-engine" }
+cudarc = { version = "0.19.10", default-features = false, features = ["std", "driver", "nvrtc", "dynamic-loading", "cuda-12060"] }
+log = "0.4"
+

@@ -70,6 +70,9 @@ pub struct PipelineContext {
     /// fastroute: told about the progress of the stages (the CLI's live viewer, `--live`).
     /// Must not change anything the routing depends on: it only reads the board.
     pub observer: Option<Observer>,
+    /// fastroute: a cost-to-go field guides the maze search of the autorouter (`--guide`,
+    /// `--gpu`; see [`crate::autoroute::guide`]).
+    pub guide: Option<std::sync::Arc<crate::autoroute::guide::GuideSettings>>,
 }
 
 /// Callback for [`PipelineContext::checkpoint`].
@@ -122,6 +125,7 @@ impl std::fmt::Debug for PipelineContext {
             .field("multi_start", &self.multi_start)
             .field("checkpoint", &self.checkpoint.is_some())
             .field("observer", &self.observer.is_some())
+            .field("guide", &self.guide)
             .finish()
     }
 }
@@ -152,6 +156,7 @@ impl Default for PipelineContext {
             multi_start: 1,
             checkpoint: None,
             observer: None,
+            guide: None,
         }
     }
 }
@@ -267,6 +272,7 @@ fn multi_start(board: &mut RoutingBoard, start: &RoutingBoard, settings: &Router
                 checkpoint: ctx.checkpoint.clone(),
                 // the variants run in parallel; the viewer shows the first run
                 observer: None,
+                guide: ctx.guide.clone(),
             };
             let mut router = BatchAutorouter::for_job(&b, settings);
             router.order_seed = Some(0x5eed_0000 + v as i64);

@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use fr_settings::{ExpansionCostFactor, RouterSettings};
 
+use crate::autoroute::guide::GuideSettings;
 use crate::autoroute::router::{route_connection, ConnectionRouterParams};
 use crate::autoroute::AutorouteAttemptResult;
 use crate::board::{AutorouteAttemptState, ItemKey, ItemSet, RoutingBoard, StopConnectionOption};
@@ -97,6 +98,8 @@ pub struct BatchAutorouter {
     pass_abort_above: Option<i32>,
     /// fastroute: the live viewer (`PipelineContext::observer`) of the job's own autorouter.
     observer: Option<super::Observer>,
+    /// fastroute: the guide field of the maze search (`PipelineContext::guide`).
+    guide: Option<std::sync::Arc<GuideSettings>>,
     // AutoroutePassRunner state
     previous_incomplete_nets: BTreeSet<NetNo>,
     previous_incomplete_count: i32,
@@ -204,6 +207,7 @@ impl BatchAutorouter {
             blocked_checked: HashSet::new(),
             pass_abort_above: None,
             observer: None,
+            guide: None,
             previous_incomplete_nets: BTreeSet::new(),
             previous_incomplete_count: -1,
             stagnation_count: 0,
@@ -225,6 +229,7 @@ impl BatchAutorouter {
             retain_autoroute_database: self.retain_autoroute_database,
             trace_pull_tight_accuracy: self.trace_pull_tight_accuracy,
             connect_to_planes: self.enhancements,
+            guide: self.guide.clone(),
         }
     }
 
@@ -895,6 +900,7 @@ impl BatchAutorouter {
         let stop = &ctx.stop;
         self.enhancements = ctx.enhancements;
         self.observer = if self.is_optimizer_autorouter { None } else { ctx.observer.clone() };
+        self.guide = ctx.guide.clone();
         if self.pass_threads == 0 {
             self.pass_threads = if ctx.enhancements && !self.is_optimizer_autorouter {
                 settings.autorouter.max_threads.unwrap_or(1).max(1) as usize

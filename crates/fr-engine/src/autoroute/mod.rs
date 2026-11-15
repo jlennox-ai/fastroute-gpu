@@ -39,6 +39,7 @@ pub mod connection;
 pub mod control;
 pub mod destination;
 pub mod engine;
+pub mod guide;
 pub mod inserter;
 pub mod locator;
 pub mod maze;
@@ -47,6 +48,7 @@ pub mod neighbours45;
 pub mod neighbours90;
 pub mod rooms;
 pub mod router;
+pub mod stats;
 
 pub use control::{AutorouteAttemptResult, AutorouteControl, ViaMask};
 pub use engine::{AutorouteEngine, DoorId, DrillId, Expandable, PageId, RoomId, TargetDoorId};

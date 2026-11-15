@@ -5,6 +5,8 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::sync::Arc;
+use std::time::Instant;
 
 use fr_geom::FloatPoint;
 use fr_settings::{ExpansionCostFactor, RouterSettings};
@@ -17,9 +19,11 @@ use crate::structure::Unit;
 
 use super::control::{AutorouteAttemptResult, AutorouteControl};
 use super::engine::AutorouteEngine;
+use super::guide::GuideSettings;
 use super::inserter::FoundConnectionInserter;
 use super::locator::FoundConnectionLocator;
 use super::maze::{MazeSearchEngine, MazeSearchResult};
+use super::stats;
 
 /// The autoroute engine stored in a [`RoutingBoard`] (Java `transient AutorouteEngine
 /// autorouteEngine`): cloning a board does not clone the engine.
@@ -59,16 +63,26 @@ impl AutorouteEngine {
         ripup_costs: Option<&mut HashMap<ItemKey, i32>>,
     ) -> AutorouteAttemptResult {
         self.process_board_changes(board);
+        let maze_start = Instant::now();
         // (panics stand for Java exceptions, which are caught like in Java)
         let search_result = {
             // outer None: the maze search could not be created; inner: the found connection
             let r: Result<Option<Option<MazeSearchResult>>, _> = catch_unwind(AssertUnwindSafe(|| {
                 let mut maze = MazeSearchEngine::get_instance(start_set, dest_set, &mut *self, &mut *board, ctrl)?;
-                Some(catch_unwind(AssertUnwindSafe(|| maze.find_connection())).unwrap_or_else(|_| {
+                let found = catch_unwind(AssertUnwindSafe(|| maze.find_connection())).unwrap_or_else(|_| {
                     log::error!("AutorouteEngine.autoroute_connection: Exception in mazeSearchAlgo.find_connection");
                     None
-                }))
+                });
+                let (polled, expanded, found_cost, rooms) = (maze.polled, maze.expanded, maze.found_cost, maze.eng.rooms.len());
+                stats::update(|s| {
+                    s.polled += polled;
+                    s.expanded += expanded;
+                    s.rooms += rooms;
+                    s.found_cost = found_cost;
+                });
+                Some(found)
             }));
+            stats::update(|s| s.maze_time += maze_start.elapsed());
             let Ok(Some(found)) = r else {
                 // (Java returns without clearing the database)
                 return AutorouteAttemptResult::with_details(
@@ -79,6 +93,7 @@ impl AutorouteEngine {
             found
         };
         let angle = board.rules.get_trace_angle_restriction();
+        let locate_start = Instant::now();
         let autoroute_result = match &search_result {
             Some(r) => catch_unwind(AssertUnwindSafe(|| {
                 FoundConnectionLocator::get_instance(r, ctrl, &mut *self, &*board, angle, &mut *ripped_item_list, ripup_costs).ok()
@@ -95,6 +110,7 @@ impl AutorouteEngine {
         } else {
             self.reset_all_doors(board);
         }
+        stats::update(|s| s.locate_time += locate_start.elapsed());
         if search_result.is_none() {
             return AutorouteAttemptResult::with_details(
                 AutorouteAttemptState::Failed,
@@ -129,6 +145,7 @@ impl AutorouteEngine {
             );
         }
         // Delete the ripped connections.
+        let insert_start = Instant::now();
         let stop_connection_option = if ctrl.remove_unconnected_vias { StopConnectionOption::None } else { StopConnectionOption::FanoutVia };
         let mut ripped_connections = ItemSet::new();
         let mut changed_nets: BTreeSet<NetNo> = BTreeSet::new();
@@ -142,7 +159,9 @@ impl AutorouteEngine {
         for net in changed_nets {
             board.remove_trace_tails(net, stop_connection_option);
         }
-        if FoundConnectionInserter::get_instance(&autoroute_result, board, ctrl).is_none() {
+        let inserted = FoundConnectionInserter::get_instance(&autoroute_result, board, ctrl).is_some();
+        stats::update(|s| s.insert_time += insert_start.elapsed());
+        if !inserted {
             return AutorouteAttemptResult::with_details(
                 AutorouteAttemptState::Failed,
                 "Failed to route connection, because the new connection could not be inserted.",
@@ -388,6 +407,8 @@ pub struct ConnectionRouterParams {
     /// fastroute: a connection may end in a via into the net's plane (see
     /// [`AutorouteControl::connect_to_planes`]).
     pub connect_to_planes: bool,
+    /// fastroute: the guide field of the maze search (see [`super::guide`]).
+    pub guide: Option<Arc<GuideSettings>>,
 }
 
 /// The result of [`route_connection`].
@@ -421,18 +442,21 @@ pub fn route_connection(
     ripup_pass_no: i32,
     stop: Option<&StopToken>,
 ) -> ConnectionRouteOutcome {
+    stats::begin(route_net_no, ripup_pass_no);
     // Java catches every exception of the routing (`catch (Exception e)` -> FAILED); a panic
     // stands for such an exception.
     let r = catch_unwind(AssertUnwindSafe(|| {
         route_connection_impl(board, settings, params, item, route_net_no, ripped_item_list, ripup_costs, ripup_pass_no, stop)
     }));
-    match r {
+    let outcome = match r {
         Ok(o) => o,
         Err(_) => {
             log::error!("Error during routing passes");
             ConnectionRouteOutcome { result: AutorouteAttemptResult::new(AutorouteAttemptState::Failed), max_item_id_before_route: None }
         }
-    }
+    };
+    stats::finish(&format!("{:?}", outcome.result.state));
+    outcome
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -454,6 +478,7 @@ fn route_connection_impl(
     ctrl.ripup_costs = params.start_ripup_costs.wrapping_mul(ripup_pass_no);
     ctrl.remove_unconnected_vias = params.remove_unconnected_vias;
     ctrl.connect_to_planes = params.connect_to_planes;
+    ctrl.guide = params.guide.clone();
     let unconnected_set = board.unconnected_set(item, route_net_no);
     if unconnected_set.is_empty() {
         return ConnectionRouteOutcome { result: AutorouteAttemptResult::new(AutorouteAttemptState::NoUnconnectedNets), max_item_id_before_route: None };
@@ -479,7 +504,9 @@ fn route_connection_impl(
     let max_item_id_before_route = crate::datastructures::IdGenerator::max_generated_id(&board.communication.id_generator);
     let autoroute_result = board.autoroute_connection(&route_start_set, &route_dest_set, &ctrl, ripped_item_list, ripup_costs.as_deref_mut());
     if autoroute_result.state == AutorouteAttemptState::Routed {
+        let optimize_start = Instant::now();
         board.opt_changed_area(&[], None, params.trace_pull_tight_accuracy, Some(&ctrl.trace_costs), stop, TIME_LIMIT_TO_PREVENT_ENDLESS_LOOP);
+        stats::update(|s| s.optimize_time += optimize_start.elapsed());
     }
     if (autoroute_result.state == AutorouteAttemptState::Failed || autoroute_result.state == AutorouteAttemptState::InsertError) && settings.get_neck_width_um() > 0.0 {
         if let Some(necked) = retry_connection_necked(
@@ -542,6 +569,7 @@ fn retry_connection_necked(
     neck_control.ripup_allowed = true;
     neck_control.ripup_costs = params.start_ripup_costs.wrapping_mul(ripup_pass_no);
     neck_control.remove_unconnected_vias = params.remove_unconnected_vias;
+    neck_control.guide = params.guide.clone();
     for i in 0..neck_control.layer_count as usize {
         let compensation = neck_control.compensated_trace_half_width[i] - neck_control.trace_half_width[i];
         neck_control.trace_half_width[i] = neck_control.trace_half_width[i].min(neck_half_width);
@@ -552,6 +580,8 @@ fn retry_connection_necked(
     if neck_result.state != AutorouteAttemptState::Routed {
         return None;
     }
+    let optimize_start = Instant::now();
     board.opt_changed_area(&[], None, params.trace_pull_tight_accuracy, Some(&neck_control.trace_costs), stop, TIME_LIMIT_TO_PREVENT_ENDLESS_LOOP);
+    stats::update(|s| s.optimize_time += optimize_start.elapsed());
     Some(neck_result)
 }

@@ -1,10 +1,13 @@
 //! Port of `autoroute/maze/DestinationDistance.java`: a lower bound for the distance between a
 //! new maze expansion element and the destination set.
 
+use std::sync::Arc;
+
 use fr_geom::{FloatPoint, IntBox};
 use fr_settings::ExpansionCostFactor;
 
 use super::control::jmin;
+use super::guide::GuideField;
 
 /// Java `DestinationDistance`.
 #[derive(Clone, Debug)]
@@ -29,6 +32,8 @@ pub struct DestinationDistance {
     component_side_box_is_empty: bool,
     solder_side_box_is_empty: bool,
     inner_side_box_is_empty: bool,
+    /// fastroute: the guide field of the connection, if any.
+    guide: Option<Arc<GuideField>>,
 }
 
 impl DestinationDistance {
@@ -93,6 +98,7 @@ impl DestinationDistance {
             component_side_box_is_empty: true,
             solder_side_box_is_empty: true,
             inner_side_box_is_empty: true,
+            guide: None,
         }
     }
 
@@ -111,9 +117,19 @@ impl DestinationDistance {
         self.box_is_empty = false;
     }
 
-    /// Java `calculate(FloatPoint point, int layer)`.
+    /// Java `calculate(FloatPoint point, int layer)`. fastroute: with a guide field, the larger of
+    /// the field's estimate and Java's.
     pub fn calculate_point(&self, point: &FloatPoint, layer: i32) -> f64 {
-        self.calculate(&point.bounding_box(), layer)
+        let result = self.calculate(&point.bounding_box(), layer);
+        match &self.guide {
+            Some(field) if result < i32::MAX as f64 => field.estimate(point, layer).map_or(result, |v| result.max(v)),
+            _ => result,
+        }
+    }
+
+    /// fastroute: sets the guide field (see [`super::guide`]).
+    pub fn set_guide(&mut self, field: Arc<GuideField>) {
+        self.guide = Some(field);
     }
 
     /// Java `calculateCheapDistance(box, layer)`.
