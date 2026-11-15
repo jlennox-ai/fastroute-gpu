@@ -145,7 +145,7 @@ jobs:
 
           * **x86-64** runs on every 64-bit Intel/AMD processor.
           * **AVX256** is built for x86-64-v3 (AVX2, 256-bit vectors: Intel Haswell 2013 / AMD Excavator 2015 and newer) and is faster; it does not start on older processors.
-          * \`--gpu\` needs an NVIDIA GPU with its driver and NVRTC from a CUDA 12 toolkit on the library path. There are no builds for Windows on ARM or macOS, which have no NVIDIA driver; [fastroute](https://github.com/parisxmas/fastroute/releases) has them.
+          * \`--gpu\` needs an NVIDIA GPU and NVIDIA's NVRTC library next to fastroute: see [What you need for \`--gpu\`](https://github.com/$GITHUB_REPOSITORY#what-you-need-for---gpu). There are no builds for Windows on ARM or macOS, which have no NVIDIA driver; [fastroute](https://github.com/parisxmas/fastroute/releases) has them.
           * The Linux builds need glibc 2.35 (Ubuntu 22.04) or newer.
 
           All builds are profile-guided (PGO); the Windows x86-64 and AVX256 profiles were trained with the GPU.
