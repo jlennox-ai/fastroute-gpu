@@ -11,9 +11,9 @@ A single-threaded routing run on a 6-layer board:
 | | share of the run |
 |---|---|
 | finding a path for a connection (maze search) | 87 % |
-| &nbsp;&nbsp;of which: building the free areas the path moves through | 43 % |
-| &nbsp;&nbsp;of which: checking where vias fit | 18 % |
-| &nbsp;&nbsp;of which: checking whether traces can be pushed aside | 9 % |
+| - of which: building the free areas the path moves through | 43 % |
+| - of which: checking where vias fit | 18 % |
+| - of which: checking whether traces can be pushed aside | 9 % |
 | inserting the found path | 7 % |
 | tidying the changed traces | 3 % |
 
@@ -25,8 +25,7 @@ itself to the GPU would make it slower.
 
 ## What the GPU does instead
 
-A* explores every spot whose cost so far plus estimate is below the cost of the final path. The
-better the estimate, the less it explores. The router's estimate is the straight distance to
+The better the estimate, the less the search explores. The router's estimate is the straight distance to
 the destination, which ignores everything in the way. On real boards the paths found cost 1.3 to
 1.6 times that estimate, so the search sweeps a wide band of the board around every connection.
 
