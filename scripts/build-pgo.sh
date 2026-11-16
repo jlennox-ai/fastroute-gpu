@@ -8,14 +8,15 @@
 # 1. builds an instrumented binary (target dir $PGO_DIR/gen),
 # 2. runs it on a few benchmark boards (training set below),
 # 3. merges the profiles with llvm-profdata and builds the optimized binary
-#    ($PGO_DIR/use/release/fastroute).
+#    ($PGO_DIR/use/<host>/release/fastroute).
 # --native additionally passes `-C target-cpu=native` (the binary then only runs on CPUs like
 # the build machine). Needs `rustup component add llvm-tools-preview` and the benchmark
 # fixtures in reference/freerouting. PGO does not change results (same code, different
 # optimization decisions; float semantics are unaffected).
 #
 # Environment: PGO_RUSTFLAGS (more compiler flags, e.g. "-C target-cpu=x86-64-v3"),
-# PGO_FEATURES (cargo features of the fastroute crate, e.g. "gpu"), PGO_DIR.
+# PGO_TRAIN_RUSTFLAGS (flags of the instrumented build instead, for a PGO_RUSTFLAGS CPU the build
+# machine cannot run), PGO_FEATURES (cargo features of the fastroute crate, e.g. "gpu"), PGO_DIR.
 set -eu
 # cargo and rustc are native programs: on Windows (Git Bash) they need C:/... paths
 native_path() {
@@ -27,15 +28,18 @@ FX=$ROOT/reference/freerouting/scripts/benchmark/fixtures
 EXTRA=${PGO_RUSTFLAGS:-}
 FEATURES=${PGO_FEATURES:-}
 if [ "${1:-}" = "--native" ]; then EXTRA="$EXTRA -C target-cpu=native"; fi
-PROFDATA=$(rustc --print sysroot)/lib/rustlib/$(rustc -vV | sed -n 's/^host: //p')/bin/llvm-profdata
+TRAIN_EXTRA=${PGO_TRAIN_RUSTFLAGS:-$EXTRA}
+HOST=$(rustc -vV | sed -n 's/^host: //p')
+PROFDATA=$(rustc --print sysroot)/lib/rustlib/$HOST/bin/llvm-profdata
 [ -x "$PROFDATA" ] || [ -x "$PROFDATA.exe" ] || { echo "llvm-profdata not found: rustup component add llvm-tools-preview" >&2; exit 1; }
 [ -d "$FX" ] || { echo "benchmark fixtures not found: $FX" >&2; exit 1; }
 
 rm -rf "$PGO_DIR/profiles"; mkdir -p "$PGO_DIR/profiles"
 echo "== instrumented build"
-RUSTFLAGS="-C profile-generate=$PGO_DIR/profiles $EXTRA" CARGO_TARGET_DIR="$PGO_DIR/gen" \
-  cargo build --release -p fastroute --features "$FEATURES" --manifest-path "$ROOT/Cargo.toml"
-BIN="$PGO_DIR/gen/release/fastroute"
+# --target keeps RUSTFLAGS away from build scripts, which run on the build machine
+RUSTFLAGS="-C profile-generate=$PGO_DIR/profiles $TRAIN_EXTRA" CARGO_TARGET_DIR="$PGO_DIR/gen" \
+  cargo build --release -p fastroute --features "$FEATURES" --target "$HOST" --manifest-path "$ROOT/Cargo.toml"
+BIN="$PGO_DIR/gen/$HOST/release/fastroute"
 OUT=$(native_path "$(mktemp -d)")
 train() {
   echo "== training: $*"
@@ -53,5 +57,5 @@ rm -rf "$OUT"
 "$PROFDATA" merge -o "$PGO_DIR/merged.profdata" "$PGO_DIR/profiles"
 echo "== optimized build"
 RUSTFLAGS="-C profile-use=$PGO_DIR/merged.profdata -Cllvm-args=-pgo-warn-missing-function=false $EXTRA" \
-  CARGO_TARGET_DIR="$PGO_DIR/use" cargo build --release -p fastroute --features "$FEATURES" --manifest-path "$ROOT/Cargo.toml"
-echo "built $PGO_DIR/use/release/fastroute"
+  CARGO_TARGET_DIR="$PGO_DIR/use" cargo build --release -p fastroute --features "$FEATURES" --target "$HOST" --manifest-path "$ROOT/Cargo.toml"
+echo "built $PGO_DIR/use/$HOST/release/fastroute"

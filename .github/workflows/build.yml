@@ -31,6 +31,9 @@ jobs:
           - { name: linux-x86-64, runner: ubuntu-22.04, profile: trained, rustflags: "" }
           - { name: linux-avx256, runner: ubuntu-22.04, profile: trained, rustflags: "-C target-cpu=x86-64-v3" }
           - { name: linux-arm64, runner: ubuntu-22.04-arm, profile: trained, rustflags: "" }
+          # the runners cannot run these: trained with an x86-64-v3 binary, not started
+          - { name: windows-x86-64-novalake, runner: windows-latest, profile: committed, rustflags: "-C target-cpu=novalake", foreign_cpu: true }
+          - { name: linux-x86-64-novalake, runner: ubuntu-22.04, profile: trained, rustflags: "-C target-cpu=novalake", trainflags: "-C target-cpu=x86-64-v3", foreign_cpu: true }
     defaults:
       run:
         shell: bash
@@ -59,6 +62,11 @@ jobs:
           toolchain: ${{ steps.version.outputs.rustc }}
           components: llvm-tools-preview
 
+      # an explicit target keeps RUSTFLAGS away from build scripts, which run on the runner
+      - name: Target
+        run: |
+          echo "CARGO_BUILD_TARGET=$(rustc -vV | sed -n 's/^host: //p')" >> "$GITHUB_ENV"
+
       - name: Build with the committed profile
         if: matrix.profile == 'committed'
         env:
@@ -80,6 +88,7 @@ jobs:
         if: matrix.profile == 'trained'
         env:
           PGO_RUSTFLAGS: ${{ matrix.rustflags }}
+          PGO_TRAIN_RUSTFLAGS: ${{ matrix.trainflags || matrix.rustflags }}
           PGO_FEATURES: gpu
           CARGO_PROFILE_RELEASE_STRIP: symbols
         run: sh scripts/build-pgo.sh
@@ -87,16 +96,18 @@ jobs:
       - name: Package
         run: |
           archive=${{ steps.version.outputs.archive }}
+          built=../target/pgo/use/$CARGO_BUILD_TARGET/release
+          started=${{ matrix.foreign_cpu && 'false' || 'true' }}
           mkdir -p "dist/$archive"
           cp LICENSE NOTICE README.md "dist/$archive/"
           cd dist
           if [ "$RUNNER_OS" = Windows ]; then
-            cp ../target/pgo/use/release/fastroute.exe "$archive/"
-            "$archive/fastroute.exe" --version
+            cp "$built/fastroute.exe" "$archive/"
+            if [ "$started" = true ]; then "$archive/fastroute.exe" --version; fi
             7z a -bd "$archive.zip" "$archive"
           else
-            cp ../target/pgo/use/release/fastroute "$archive/"
-            "$archive/fastroute" --version
+            cp "$built/fastroute" "$archive/"
+            if [ "$started" = true ]; then "$archive/fastroute" --version; fi
             # NVRTC is looked up next to the executable (crates/fastroute/build.rs)
             readelf -d "$archive/fastroute" | grep -q 'Library rpath: \[\$ORIGIN\]' \
               || { echo "fastroute has no RPATH \$ORIGIN" >&2; readelf -d "$archive/fastroute" >&2; exit 1; }
@@ -128,7 +139,7 @@ jobs:
         run: |
           cd dist
           version=${GITHUB_REF_NAME#v}
-          [ "$(ls | wc -l)" = 5 ] || { echo "expected 5 archives:" >&2; ls >&2; exit 1; }
+          [ "$(ls | wc -l)" = 7 ] || { echo "expected 7 archives:" >&2; ls >&2; exit 1; }
           sha256sum * > SHA256SUMS.txt
           cat > ../notes.md <<EOF
           * **AVX256** is faster but needs a processor from 2013 or later; otherwise use **x86-64**.
