@@ -7,11 +7,11 @@
 //! structure (which is why the tree reproduces Java's exactly).
 
 use fr_geom::prelude::*;
-use fr_geom::{IntBox, IntOctagon, Line, LineSegment, Side, Simplex, TileShape};
+use fr_geom::{IntBox, IntOctagon, Line, LineSegment, RegularTileShape, Side, Simplex, TileShape};
 
 use crate::autoroute::rooms::IncompleteFreeSpaceExpansionRoom;
-use crate::datastructures::TreeCursor;
-use crate::ids::NetNo;
+use crate::datastructures::{LeafRef, TreeCursor};
+use crate::ids::{LayerNo, NetNo};
 
 use super::basic_board::BasicBoard;
 use super::search_tree::{layer_bit, sort_leaves_canonical, TreeKind, TreeObject};
@@ -41,6 +41,19 @@ impl BasicBoard {
             TreeKind::FortyfiveDegree => self.complete_shape_45(t, room, net_number, ignore_object, ignore_shape),
             TreeKind::NinetyDegree => self.complete_shape_90(t, room, net_number, ignore_object, ignore_shape),
         }
+    }
+
+    /// Whether a leaf found by a walk with mask `layer_mask` (the bit of `room_layer`) is on
+    /// `room_layer`. A leaf mask contains the bit of the leaf's shape layer, so a mask equal to
+    /// that single bit settles it without looking the shape layer up.
+    fn leaf_on_layer(&self, t: usize, leaf: &LeafRef<'_, TreeObject>, room_layer: LayerNo, layer_mask: u64) -> bool {
+        if layer_mask.is_power_of_two() && leaf.mask == layer_mask {
+            if super::connectivity::verify_caches() {
+                assert_eq!(self.object_shape_layer(t, leaf.object, leaf.shape_index_in_object), room_layer, "leaf mask of {:?}", leaf.object);
+            }
+            return true;
+        }
+        self.object_shape_layer(t, leaf.object, leaf.shape_index_in_object) == room_layer
     }
 
     fn is_ignored(object: TreeObject, ignore_object: Option<TreeObject>) -> bool {
@@ -241,20 +254,24 @@ impl BasicBoard {
         let mut cursor = TreeCursor::new();
         cursor.start(&tree.tree);
         let layer_mask = layer_bit(room_layer);
-        while let Some(leaf) = cursor.next_leaf_masked(&tree.tree, &fr_geom::RegularTileShape::IntOctagon(bounding_shape), layer_mask) {
+        while let Some(leaf) = cursor.next_leaf_masked(&tree.tree, &RegularTileShape::IntOctagon(bounding_shape), layer_mask) {
             let l = tree.tree.leaf(leaf).unwrap();
             let object = l.object;
             let shape_index = l.shape_index_in_object;
             let is_obstacle = self.object_is_trace_obstacle(object, net_number);
-            let same_layer = self.object_shape_layer(t, object, shape_index) == room_layer;
+            let same_layer = self.leaf_on_layer(t, &l, room_layer, layer_mask);
             if !(is_obstacle && same_layer && !Self::is_ignored(object, ignore_object)) {
                 continue;
             }
-            let object_shape = self
-                .object_tree_shape(t, object, shape_index)
-                .expect("tree shape")
-                .bounding_octagon()
-                .expect("bounding octagon");
+            // The leaf bounds are the bounding octagon of the object's tree shape: they were
+            // computed from it on insertion, so the shape is not fetched again.
+            let RegularTileShape::IntOctagon(object_shape) = *l.bounding_shape else {
+                panic!("45 degree search tree: octagon leaf bounds expected");
+            };
+            if super::connectivity::verify_caches() {
+                let fetched = self.object_tree_shape(t, object, shape_index).expect("tree shape").bounding_octagon().expect("bounding octagon");
+                assert_eq!(object_shape, fetched, "leaf bounds differ from the tree shape of {object:?}");
+            }
             new_result.clear();
             let mut new_bounding_shape = IntOctagon::EMPTY;
             for &(current_shape, current_contained) in &result {
@@ -338,16 +355,24 @@ impl BasicBoard {
         let mut cursor = TreeCursor::new();
         cursor.start(&tree.tree);
         let layer_mask = layer_bit(room_layer);
-        while let Some(leaf) = cursor.next_leaf_masked(&tree.tree, &fr_geom::RegularTileShape::IntBox(bounding_shape), layer_mask) {
+        while let Some(leaf) = cursor.next_leaf_masked(&tree.tree, &RegularTileShape::IntBox(bounding_shape), layer_mask) {
             let l = tree.tree.leaf(leaf).unwrap();
             let object = l.object;
             let shape_index = l.shape_index_in_object;
             let is_obstacle = self.object_is_trace_obstacle(object, net_number);
-            let same_layer = self.object_shape_layer(t, object, shape_index) == room_layer;
+            let same_layer = self.leaf_on_layer(t, &l, room_layer, layer_mask);
             if !(is_obstacle && same_layer && !Self::is_ignored(object, ignore_object)) {
                 continue;
             }
-            let object_shape = self.object_tree_shape(t, object, shape_index).expect("tree shape").bounding_box();
+            // The leaf bounds are the bounding box of the object's tree shape (see the 45 degree
+            // variant).
+            let RegularTileShape::IntBox(object_shape) = *l.bounding_shape else {
+                panic!("90 degree search tree: box leaf bounds expected");
+            };
+            if super::connectivity::verify_caches() {
+                let fetched = self.object_tree_shape(t, object, shape_index).expect("tree shape").bounding_box();
+                assert_eq!(object_shape, fetched, "leaf bounds differ from the tree shape of {object:?}");
+            }
             let mut new_result: Vec<IncompleteFreeSpaceExpansionRoom> = Vec::new();
             let mut new_bounding_shape = IntBox::EMPTY;
             for current_room in result {

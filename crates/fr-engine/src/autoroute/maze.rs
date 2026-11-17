@@ -81,8 +81,18 @@ impl MazeListElement {
     }
 }
 
+/// An entry of the maze queue: the slot of the element in [`MazeSearchEngine::elements`] with
+/// copies of its two sort values, so that a comparison reads the tree node only and goes to the
+/// element just to break a tie. A queued element never changes, so the copies stay equal to it.
+#[derive(Clone, Copy, Debug)]
+pub struct QueueKey {
+    pub sorting_value: f64,
+    pub expansion_value: f64,
+    pub index: usize,
+}
+
 /// Java `MazeListElement.compareTo` (the door ids are evaluated live).
-fn compare_elements(a: &MazeListElement, b: &MazeListElement, eng: &AutorouteEngine) -> Ordering {
+fn compare_elements(a: &QueueKey, b: &QueueKey, elements: &[MazeListElement], eng: &AutorouteEngine) -> Ordering {
     if a.sorting_value < b.sorting_value {
         return Ordering::Less;
     }
@@ -95,15 +105,17 @@ fn compare_elements(a: &MazeListElement, b: &MazeListElement, eng: &AutorouteEng
     if a.expansion_value > b.expansion_value {
         return Ordering::Greater;
     }
-    let id1 = eng.expandable_java_id(a.door);
-    let id2 = eng.expandable_java_id(b.door);
+    let element_a = &elements[a.index];
+    let element_b = &elements[b.index];
+    let id1 = eng.expandable_java_id(element_a.door);
+    let id2 = eng.expandable_java_id(element_b.door);
     if id1 < id2 {
         return Ordering::Less;
     }
     if id1 > id2 {
         return Ordering::Greater;
     }
-    a.section_no_of_door.cmp(&b.section_no_of_door)
+    element_a.section_no_of_door.cmp(&element_b.section_no_of_door)
 }
 
 /// Java `MazeSearchEngine.Result`.
@@ -132,7 +144,7 @@ pub struct MazeSearchEngine<'a> {
     pub elements: Vec<MazeListElement>,
     free_elements: Vec<usize>,
     /// Java `mazeExpansionList` (a `TreeSet`).
-    pub queue: JavaTreeSet<usize>,
+    pub queue: JavaTreeSet<QueueKey>,
     /// If set, the indices of the elements added to the queue are recorded (debugging aid).
     pub trace_added: Option<Vec<usize>>,
     pub destination_distance: DestinationDistance,
@@ -215,6 +227,8 @@ impl<'a> MazeSearchEngine<'a> {
                 }
             }
         }
+        let sorting_value = element.sorting_value;
+        let expansion_value = element.expansion_value;
         let index = match self.free_elements.pop() {
             Some(i) => {
                 self.elements[i] = element;
@@ -227,7 +241,8 @@ impl<'a> MazeSearchEngine<'a> {
         };
         let elements = &self.elements;
         let eng: &AutorouteEngine = self.eng;
-        let added = self.queue.add_by(index, |a, b| compare_elements(&elements[*a], &elements[*b], eng));
+        let key = QueueKey { sorting_value, expansion_value, index };
+        let added = self.queue.add_by(key, |a, b| compare_elements(a, b, elements, eng));
         if added {
             if let Some(t) = &mut self.trace_added {
                 t.push(index);
@@ -245,7 +260,7 @@ impl<'a> MazeSearchEngine<'a> {
 
     /// The first element of the queue.
     pub fn queue_first(&self) -> Option<&MazeListElement> {
-        self.queue.first().map(|i| &self.elements[*i])
+        self.queue.first().map(|key| &self.elements[key.index])
     }
 
     /// Java `findConnection()`: the destination door and its section of the found connection.
@@ -266,7 +281,7 @@ impl<'a> MazeSearchEngine<'a> {
             if self.eng.is_stop_requested() {
                 return false;
             }
-            let index = self.queue.poll_first().unwrap();
+            let index = self.queue.poll_first().unwrap().index;
             self.polled += 1;
             let e = self.elements[index].clone();
             // (kept while tracing: the trace reads the elements after the search)

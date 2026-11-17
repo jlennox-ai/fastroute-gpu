@@ -135,6 +135,8 @@ pub struct LeafRef<'a, O> {
     pub object: O,
     pub shape_index_in_object: i32,
     pub bounding_shape: &'a RegularTileShape,
+    /// The mask given at insertion (see [`MinAreaTree::insert_shape_masked`]).
+    pub mask: u64,
 }
 
 /// Result of [`MinAreaTree::statistics`] (Java `ShapeTree.statistics` logs these values).
@@ -338,6 +340,7 @@ impl<O: Copy> MinAreaTree<O> {
                 object,
                 shape_index_in_object: shape_index,
                 bounding_shape: &node.bounds,
+                mask: node.mask,
             }),
             _ => None,
         }
@@ -484,10 +487,17 @@ impl<O: Copy> MinAreaTree<O> {
                 NodeKind::Leaf { .. } => return node,
                 NodeKind::Free { .. } => unreachable!("MinAreaTree: free node reachable"),
             };
-            let enlarged = leaf_bounds.union(&self.nodes[node as usize].bounds);
-            self.nodes[node as usize].bounds = enlarged;
-            self.nodes[node as usize].mask |= leaf_mask;
-            self.sync_hot(node);
+            // (written only if it changes: near the root the bounds usually contain the leaf
+            // already, and a write copies a chunk shared with a clone)
+            let current = &self.nodes[node as usize];
+            let enlarged = leaf_bounds.union(&current.bounds);
+            let new_mask = current.mask | leaf_mask;
+            if enlarged != current.bounds || new_mask != current.mask {
+                let current = &mut self.nodes[node as usize];
+                current.bounds = enlarged;
+                current.mask = new_mask;
+                self.sync_hot(node);
+            }
 
             // Choose the child, so that the area increase of that child after taking the union
             // with the shape of leafToInsert is minimal.

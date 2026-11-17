@@ -227,13 +227,42 @@ Time: parallel mode unchanged or faster; exact mode (single thread) +3–4 % (CM
 interf_u 14.8 → 15.4 s) from the chunked node and slot reads. Storing the traversal array and
 the grid chunked as well cost +9–14 %, which is why they are shared whole.
 
+## Round 3 (fastroute-gpu)
+
+Same rules (byte-identical SES; checked on the boards below and with `FASTROUTE_VERIFY_CACHES=1`).
+i9-10900K, Windows, release build with `target-cpu=x86-64-v3`, no PGO. Profiled with Visual
+Studio's collector (`VSDiagnostics.exe`, no admin rights needed) and `xperf -a dumper`.
+
+| # | Change | Where |
+|---|---|---|
+| R3.1 | The maze queue's key holds copies of the element's two sort values: a comparison reads the tree node only (the element is read for the door id tie-break, 0.03 % of the time) | `maze.rs` (`QueueKey`) |
+| R3.2 | `completeShape` (45 and 90 degree) takes the obstacle's bounding shape from the leaf (computed from the same tree shape on insertion) instead of fetching the tree shape again | `complete_shape.rs` |
+| R3.3 | `positionLocate` writes a node only if its bounds or mask change (near the root they rarely do) | `min_area_tree.rs` |
+| R3.4 | `completeShape` skips the shape layer lookup for leaves whose mask is the room layer's bit | `complete_shape.rs` |
+
+| config | before (s) | after (s) |
+|---|---|---|
+| CM5_MINIMA_3 `ar -mp 3` | 21.0 / 20.6 | 19.1 / 18.3 |
+| DAC2020_bm04 `ar` | 55.6 / 55.3 / 56.9 | 52.6 / 52.0 / 52.4 |
+| interf_u full | 33.9 / 34.2 / 33.4 | 31.7 / 32.5 / 31.1 |
+| 6-layer GameTank board, pass 1, 1 thread | 281.7 | 267.8 |
+| same with `--gpu` | 141.8 | 127.9 |
+
+Tried and dropped: prefetching both children in the tree walk (about 1 % on CM5, nothing on
+the others). A per-thread GPU solver instead of one shared one: with 3 router threads the
+lock costs about 3 ms of a 19 ms solve (< 3 % of thread time).
+
+With `--gpu` and one router thread, waiting for the field is 15 % of the run (GPU relaxation;
+the download is 1 %), the `completeShape` walk 14 %, the via checks 14 %, inserting and tidying
+the found trace 12 %, the grid scans 6 %. With 3 router threads, the threads route only
+63 % of the time: commits are in dispatch order, and one slow connection (the slowest 1 %
+take up to 3 s, 15 % of the routing time) holds up the results behind it once the window
+(2 per thread) is full.
+
 ## Next ideas
 
-* 45-degree `completeShape` tree walk (~9 % self) and grid scans (~6 %) remain the largest
-  single items; everything else is ≤ 5 %.
-* Maze `TreeSet`: door ids are recomputed through room lookups on every comparison; caching
-  them needs invalidation whenever a room is completed.
+* 45-degree `completeShape` tree walk and grid scans remain the largest single items; everything
+  else is ≤ 5 %.
 * Parallel mode: the remaining gap between live heap and RSS is mimalloc's per-thread
   retention (e.g. `mi_collect` after each candidate, if memory matters more than ~2 % speed);
   multi-start variants still hold one board and routing state each.
-* Make PGO the default release pipeline (CI step running `scripts/build-pgo.sh`).

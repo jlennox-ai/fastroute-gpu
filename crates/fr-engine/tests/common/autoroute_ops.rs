@@ -264,7 +264,7 @@ pub fn execute(board: &mut RoutingBoard, op: &str, t: &mut Tok) -> Option<Vec<St
                     step_lines.push(queue_state(&maze));
                     if let Some(added) = maze.trace_added.take() {
                         // (Java lists the added elements still in the queue in queue order)
-                        let mut still: Vec<usize> = maze.queue.iter().copied().filter(|i| added.contains(i)).collect();
+                        let mut still: Vec<usize> = maze.queue.iter().map(|key| key.index).filter(|i| added.contains(i)).collect();
                         still.dedup();
                         for i in still {
                             let e = &maze.elements[i];
