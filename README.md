@@ -15,9 +15,9 @@ Intel Core i9-10900K, GeForce RTX 3080, Windows 11.
 
 | | fastroute 0.1.14 (original) | fastroute-gpu (CPU only) | fastroute-gpu (`--gpu`) |
 |---|---|---|---|
-| First pass | 211 s | 180 s | 62 s |
-| Down to 1 unrouted | 1014 s | 866 s | 301 s |
-| Whole run | 1058 s | 901 s | **509 s** |
+| First pass | 211 s | 168 s | 58 s |
+| Down to 1 unrouted | 1014 s | 819 s | 268 s |
+| Whole run | 1058 s | 824 s | **439 s** |
 | Vias | 2001 | 2001 | 2006 |
 | Track length | 33.40 m | 33.40 m | 33.49 m |
 

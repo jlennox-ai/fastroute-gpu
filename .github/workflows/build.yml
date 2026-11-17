@@ -71,9 +71,17 @@ jobs:
         if: matrix.profile == 'committed'
         env:
           # RUSTFLAGS and CARGO_TARGET_DIR replace the local settings of .cargo/config.toml
-          RUSTFLAGS: ${{ matrix.rustflags }} -C profile-use=${{ github.workspace }}\pgo\fastroute.profdata
+          RUSTFLAGS: ${{ matrix.rustflags }} -C profile-use=${{ github.workspace }}\pgo\fastroute.profdata -Cllvm-args=-pgo-warn-missing-function
           CARGO_TARGET_DIR: ${{ github.workspace }}\target\pgo\use
-        run: cargo build --release --locked -p fastroute --features gpu
+        # Functions the profile does not know are compiled without it: fail rather than ship a build
+        # without PGO (a profile trained before a code change, or built with other symbol names).
+        run: |
+          cargo build --release --locked -p fastroute --features gpu 2>&1 | tee build.log
+          missing=$(grep -c "no profile data available" build.log || true)
+          if [ "$missing" != 0 ]; then
+            echo "$missing functions have no PGO profile data: retrain it (scripts/pgo-profile.sh)" >&2
+            exit 1
+          fi
 
       - name: Fetch the training boards
         if: matrix.profile == 'trained'
