@@ -14,6 +14,8 @@
 # 3. merges the profiles into pgo/fastroute.profdata and records the rustc that wrote it in
 #    pgo/rustc-version (the workflow installs that version: a profile is only read correctly
 #    by the compiler version it was made with).
+# Every build that uses the profile must pass an explicit --target, as this one does: cargo
+# hashes it into the symbol names, and a profile only applies to functions of the same name.
 set -eu
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 BOARDS=${PGO_BOARDS:-$ROOT/../gametank/test-boards}
@@ -33,8 +35,8 @@ mkdir -p "$WORK/profiles" "$WORK/out"
 
 echo "== instrumented build"
 RUSTFLAGS="-C profile-generate=$WORK/profiles -C target-cpu=x86-64-v3" CARGO_TARGET_DIR="$WORK/gen" \
-  cargo build --release -p fastroute --features gpu --manifest-path "$ROOT/Cargo.toml"
-BIN=$WORK/gen/release/fastroute
+  cargo build --release -p fastroute --features gpu --target "$HOST" --manifest-path "$ROOT/Cargo.toml"
+BIN=$WORK/gen/$HOST/release/fastroute
 
 FAILED=$WORK/out/failed
 train() {
